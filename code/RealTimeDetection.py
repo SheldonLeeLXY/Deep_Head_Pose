@@ -13,6 +13,9 @@ import datasets, hopenet, utils
 from mtcnn import MTCNN
 from PIL import Image
 
+# 检测是否有可用的 GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 cudnn.enabled = True
 snapshot_path = "../hopenet_robust_alpha1.pkl"
 
@@ -32,13 +35,13 @@ transformations = transforms.Compose([
 ])
 
 # Ensure the model runs on CPU
-model.to(torch.device('cpu'))
+model.to(device)
 
 # Model in evaluation mode
 model.eval()
 
 # Create tensor for continuous angle predictions
-idx_tensor = torch.FloatTensor([idx for idx in range(66)]).to(torch.device('cpu'))
+idx_tensor = torch.FloatTensor([idx for idx in range(66)]).to(device)
 
 # Initialize face detector
 detector = MTCNN()
@@ -49,7 +52,7 @@ l1loss = torch.nn.L1Loss(size_average=False)
 
 # Start capturing from webcam
 def webcam_real_time_detection():
-    cap = cv2.VideoCapture(61)  # Open webcam (change the argument to a video file path for video input)
+    cap = cv2.VideoCapture(0)  # Open webcam (change the argument to a video file path for video input)
 
     # Set the camera resolution to 640x480
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -81,7 +84,7 @@ def webcam_real_time_detection():
             img = img.unsqueeze(0)  # Add batch dimension
 
             # Prepare image for model
-            images = Variable(img).to(torch.device('cpu'))
+            images = Variable(img).to(device)
 
             # Perform head pose prediction
             yaw, pitch, roll = model(images)
