@@ -3,6 +3,13 @@ import torchvision
 import hopenet
 # from rknn.api import RKNN
 from rknnlite.api import RKNNLite
+import cv2
+import numpy as np
+import utils
+from mtcnn import MTCNN
+from PIL import Image
+from torch.autograd import Variable
+from torchvision import transforms
 
 
 def save_model_to_torchscript(model_class, model_path, save_path):
@@ -156,7 +163,7 @@ def convert_onnx_to_rknn(onnx_model_path, rknn_model_path):
 
 def run_rknn_realtime_video(rknn_model_path):
     """
-    使用导出的RKNN模型对实时视频进行处理
+    使用导出的RKNN模型对实时视频进行处理，并在视频帧中绘制yaw、pitch、roll方向的坐标轴
 
     参数:
     rknn_model_path: str, 已导出的RKNN模型的路径 (.rknn)
@@ -164,7 +171,8 @@ def run_rknn_realtime_video(rknn_model_path):
     返回:
     None
     """
-    # 创建 RKNN 对象
+
+    # 创建 RKNNLite 对象
     rknn_lite = RKNNLite()
 
     # 加载 RKNN 模型
@@ -177,14 +185,32 @@ def run_rknn_realtime_video(rknn_model_path):
 
     # 初始化运行时环境
     print('--> Init runtime environment')
-    ret = rknn_lite.init_runtime(target='rk3588')  # 根据目标设备修改 'rk3566', 'rk3588', 'rk1808', 等
+    ret = rknn_lite.init_runtime(core_mask=RKNNLite.NPU_CORE_0)
     if ret != 0:
         print('Init runtime failed!')
         return
     print('done')
 
+    # Image transformations
+    transformations = transforms.Compose([
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # Create tensor for continuous angle predictions
+    idx_tensor = torch.FloatTensor([idx for idx in range(66)]).to(device)
+
+    # Initialize face detector
+    detector = MTCNN()
+
     # 打开摄像头
-    cap = cv2.VideoCapture(0)  # 参数 0 表示打开本地摄像头
+    cap = cv2.VideoCapture(61)  # 参数为摄像头索引或视频文件路径
+
+    # Set the camera resolution to 640x480
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     if not cap.isOpened():
         print("无法打开摄像头")
@@ -197,36 +223,70 @@ def run_rknn_realtime_video(rknn_model_path):
             print("无法读取帧")
             break
 
-        # 调整图像大小到模型输入大小
-        img = cv2.resize(frame, (224, 224))
-        img = img.astype('float32')
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # 将图像转换为输入数据
-        img_input = np.expand_dims(img, axis=0)  # 添加 batch 维度
+        # Detect faces in the frame
+        faces = detector.detect_faces(img_rgb)
 
-        # 推理
-        outputs = rknn.inference(inputs=[img_input])
+        if len(faces) > 0:
+            face = faces[0]['box']  # Assuming a single face
+            x, y, w, h = map(int, face)  # Ensure coordinates are integers
 
-        # 显示推理结果 (这里的输出内容需根据你的模型进行解析和展示)
-        print(f'Inference results: {outputs}')
+            # Print the detected face coordinates for debugging
+            print(f"Detected face at: x={x}, y={y}, w={w}, h={h}")
 
-        # 在摄像头图像上展示推理结果
-        cv2.putText(frame, f'Yaw: {outputs[0][0]:.2f}, Pitch: {outputs[1][0]:.2f}, Roll: {outputs[2][0]:.2f}',
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # Crop and prepare the image for the model
+            img = Image.fromarray(img_rgb)
+            img = img.crop((int(x - 20), int(y - 20), int(x + w + 20), int(y + h + 20)))
+            img = img.convert('RGB')
+            img = transformations(img)
+            img = img.unsqueeze(0)  # Add batch dimension
 
-        # 显示图像
-        cv2.imshow('Real-Time Video Processing', frame)
+            # Perform head pose prediction
+            yaw, pitch, roll = rknn_lite.inference(inputs=[img])
 
-        # 按 'q' 键退出循环
+            # Continuous predictions
+            yaw_predicted = utils.softmax_temperature(yaw.data, 1)
+            pitch_predicted = utils.softmax_temperature(pitch.data, 1)
+            roll_predicted = utils.softmax_temperature(roll.data, 1)
+
+            yaw_predicted = torch.sum(yaw_predicted * idx_tensor, 1).cpu() * 3 - 99
+            pitch_predicted = torch.sum(pitch_predicted * idx_tensor, 1).cpu() * 3 - 99
+            roll_predicted = torch.sum(roll_predicted * idx_tensor, 1).cpu() * 3 - 99
+
+            # Extract predictions
+            pitch = pitch_predicted[0].item()
+            yaw = yaw_predicted[0].item()  # Negate yaw for visualization
+            roll = roll_predicted[0].item()
+
+            # Calculate the center of the face for axis drawing
+            face_center_x = x + w // 2
+            face_center_y = y + h // 2
+
+            # Print the calculated center for debugging
+            print(f"Drawing axis at: face_center_x={face_center_x}, face_center_y={face_center_y}")
+
+            # Draw axis on the frame at the face's center
+            utils.draw_axis(frame, yaw, pitch, roll, tdx=face_center_x, tdy=face_center_y)
+
+            # Display yaw, pitch, and roll values on the image
+            cv2.putText(frame, f"Yaw: {yaw:.2f}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Pitch: {pitch:.2f}", (x, y - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Roll: {roll:.2f}", (x, y - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # Display the result
+        cv2.imshow('Head Pose Estimation', frame)
+
+        # Break the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    # 释放摄像头和关闭窗口
+    # Release the capture and close windows
     cap.release()
     cv2.destroyAllWindows()
 
     # 释放 RKNN 资源
-    rknn.release()
+    rknn_lite.release()
 
 
 # 使用示例
