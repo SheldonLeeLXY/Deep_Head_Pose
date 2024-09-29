@@ -172,6 +172,9 @@ def run_rknn_realtime_video(rknn_model_path):
     None
     """
 
+    # 检测是否有可用的 GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     # 创建 RKNNLite 对象
     rknn_lite = RKNNLite()
 
@@ -185,7 +188,7 @@ def run_rknn_realtime_video(rknn_model_path):
 
     # 初始化运行时环境
     print('--> Init runtime environment')
-    ret = rknn_lite.init_runtime(core_mask=RKNNLite.NPU_CORE_0)
+    ret = rknn_lite.init_runtime(core_mask=RKNNLite.NPU_CORE_0 | RKNNLite.NPU_CORE_1 | RKNNLite.NPU_CORE_2)
     if ret != 0:
         print('Init runtime failed!')
         return
@@ -240,15 +243,33 @@ def run_rknn_realtime_video(rknn_model_path):
             img = img.crop((int(x - 20), int(y - 20), int(x + w + 20), int(y + h + 20)))
             img = img.convert('RGB')
             img = transformations(img)
-            img = img.unsqueeze(0)  # Add batch dimension
+            # Convert PyTorch tensor to numpy array
+            img = img.squeeze(0).cpu().numpy()  # Convert from tensor to numpy and remove batch dimension
 
-            # Perform head pose prediction
-            yaw, pitch, roll = rknn_lite.inference(inputs=[img])
+            # Add batch dimension (1, channels, height, width)
+            img = np.expand_dims(img, axis=0)  # Now img has shape (1, 3, 224, 224)
 
-            # Continuous predictions
-            yaw_predicted = utils.softmax_temperature(yaw.data, 1)
-            pitch_predicted = utils.softmax_temperature(pitch.data, 1)
-            roll_predicted = utils.softmax_temperature(roll.data, 1)
+            # Perform inference
+            result = rknn_lite.inference(inputs=[img])
+            if result is None:
+                print("Inference failed!")
+                continue
+
+            # Convert inference result from memoryview to numpy array
+            yaw, pitch, roll = result
+            yaw = np.array(yaw)  # Convert memoryview to numpy
+            pitch = np.array(pitch)
+            roll = np.array(roll)
+
+            # Optionally convert to PyTorch tensor
+            yaw_tensor = torch.tensor(yaw)
+            pitch_tensor = torch.tensor(pitch)
+            roll_tensor = torch.tensor(roll)
+
+            # Apply softmax temperature
+            yaw_predicted = utils.softmax_temperature(yaw_tensor, 1)
+            pitch_predicted = utils.softmax_temperature(pitch_tensor, 1)
+            roll_predicted = utils.softmax_temperature(roll_tensor, 1)
 
             yaw_predicted = torch.sum(yaw_predicted * idx_tensor, 1).cpu() * 3 - 99
             pitch_predicted = torch.sum(pitch_predicted * idx_tensor, 1).cpu() * 3 - 99
