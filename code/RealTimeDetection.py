@@ -49,7 +49,7 @@ l1loss = torch.nn.L1Loss(size_average=False)
 
 # Start capturing from webcam
 def webcam_real_time_detection():
-    cap = cv2.VideoCapture(0)  # Open webcam (change the argument to a video file path for video input)
+    cap = cv2.VideoCapture(61)  # Open webcam (change the argument to a video file path for video input)
 
     # Set the camera resolution to 640x480
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -109,6 +109,11 @@ def webcam_real_time_detection():
 
             # Draw axis on the frame at the face's center
             utils.draw_axis(frame, yaw, pitch, roll, tdx=face_center_x, tdy=face_center_y)
+
+            # Display yaw, pitch, and roll values on the image
+            cv2.putText(frame, f"Yaw: {yaw:.2f}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Pitch: {pitch:.2f}", (x, y - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Roll: {roll:.2f}", (x, y - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
         # Display the result
         cv2.imshow('Head Pose Estimation', frame)
