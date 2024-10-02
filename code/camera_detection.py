@@ -1,30 +1,26 @@
-import sys, os, argparse
-import numpy as np
 import cv2
 import torch
-import torch.nn as nn
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
 from torchvision import transforms
-import torch.backends.cudnn as cudnn
-import torchvision
-import torch.nn.functional as F
-import datasets, hopenet, utils
 from mtcnn import MTCNN
 from PIL import Image
+import numpy as np
+from math import cos, sin
 
 # 检测是否有可用的 GPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-cudnn.enabled = True
-snapshot_path = "../hopenet_robust_alpha1.pkl"
+# TorchScript 模型的路径
+scripted_model_path = "../hopenet_model.pt"
 
-# ResNet50 structure
-model = hopenet.Hopenet(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], 66)
+# 加载 TorchScript 模型
+model = torch.jit.load(scripted_model_path)
 
-# Load model weights
-saved_state_dict = torch.load(snapshot_path, map_location=device)
-model.load_state_dict(saved_state_dict)
+# 确保模型使用 GPU 或 CPU
+model.to(device)
+
+# 模型设置为评估模式
+model.eval()
 
 # Image transformations
 transformations = transforms.Compose([
@@ -34,20 +30,49 @@ transformations = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# Ensure the model runs on CPU
-model.to(device)
-
-# Model in evaluation mode
-model.eval()
-
 # Create tensor for continuous angle predictions
 idx_tensor = torch.FloatTensor([idx for idx in range(66)]).to(device)
 
 # Initialize face detector
 detector = MTCNN()
 
-# L1 loss for error calculation
-l1loss = torch.nn.L1Loss(size_average=False)
+def softmax_temperature(tensor, temperature):
+    result = torch.exp(tensor / temperature)
+    result = torch.div(result, torch.sum(result, 1).unsqueeze(1).expand_as(result))
+    return result
+
+def draw_axis(img, yaw, pitch, roll, tdx=None, tdy=None, size = 100):
+
+    pitch = pitch * np.pi / 180
+    yaw = -(yaw * np.pi / 180)
+    roll = roll * np.pi / 180
+
+    if tdx != None and tdy != None:
+        tdx = tdx
+        tdy = tdy
+    else:
+        height, width = img.shape[:2]
+        tdx = width / 2
+        tdy = height / 2
+
+    # X-Axis pointing to right. drawn in red
+    x1 = size * (cos(yaw) * cos(roll)) + tdx
+    y1 = size * (cos(pitch) * sin(roll) + cos(roll) * sin(pitch) * sin(yaw)) + tdy
+
+    # Y-Axis | drawn in green
+    #        v
+    x2 = size * (-cos(yaw) * sin(roll)) + tdx
+    y2 = size * (cos(pitch) * cos(roll) - sin(pitch) * sin(yaw) * sin(roll)) + tdy
+
+    # Z-Axis (out of the screen) drawn in blue
+    x3 = size * (sin(yaw)) + tdx
+    y3 = size * (-cos(yaw) * sin(pitch)) + tdy
+
+    cv2.line(img, (int(tdx), int(tdy)), (int(x1),int(y1)),(0,0,255),3)
+    cv2.line(img, (int(tdx), int(tdy)), (int(x2),int(y2)),(0,255,0),3)
+    cv2.line(img, (int(tdx), int(tdy)), (int(x3),int(y3)),(255,0,0),2)
+
+    return img
 
 
 # Start capturing from webcam
@@ -90,9 +115,9 @@ def webcam_real_time_detection():
             yaw, pitch, roll = model(images)
 
             # Continuous predictions
-            yaw_predicted = utils.softmax_temperature(yaw.data, 1)
-            pitch_predicted = utils.softmax_temperature(pitch.data, 1)
-            roll_predicted = utils.softmax_temperature(roll.data, 1)
+            yaw_predicted = softmax_temperature(yaw.data, 1)
+            pitch_predicted = softmax_temperature(pitch.data, 1)
+            roll_predicted = softmax_temperature(roll.data, 1)
 
             yaw_predicted = torch.sum(yaw_predicted * idx_tensor, 1).cpu() * 3 - 99
             pitch_predicted = torch.sum(pitch_predicted * idx_tensor, 1).cpu() * 3 - 99
@@ -111,7 +136,7 @@ def webcam_real_time_detection():
             print(f"Drawing axis at: face_center_x={face_center_x}, face_center_y={face_center_y}")
 
             # Draw axis on the frame at the face's center
-            utils.draw_axis(frame, yaw, pitch, roll, tdx=face_center_x, tdy=face_center_y)
+            draw_axis(frame, yaw, pitch, roll, tdx=face_center_x, tdy=face_center_y)
 
             # Display yaw, pitch, and roll values on the image
             cv2.putText(frame, f"Yaw: {yaw:.2f}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
